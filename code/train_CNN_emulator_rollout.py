@@ -6,13 +6,17 @@ from tensorflow.keras import layers, models
 import numpy as np
 from netCDF4 import Dataset
 import json
-
+import random
 
 # -----------------------------------------------  below are the key settings
 
 # state variables included
   
 state_variables_names = ["temp", "salt", "P1_Chl", "P2_Chl", "P3_Chl", "P4_Chl", "P1_c", "P2_c", "P3_c", "P4_c", "P1_n", "P2_n", "P3_n", "P4_n", "P1_p", "P2_p", "P3_p", "P4_p", "P1_s", "Z4_c", "Z5_c", "Z6_c", "Z5_n", "Z6_n", "Z5_p", "Z6_p", "R1_c", "R2_c", "R3_c", "R1_n", "R1_p", "R4_c", "R6_c", "R8_c", "R4_n", "R6_n", "R8_n", "R4_p", "R6_p", "R8_p", "R6_s", "R8_s", "B1_c", "B1_n", "B1_p", "N3_n", "N1_p", "N4_n", "N5_s", "O2_o", "O3_c", "O3_pH"]  
+
+C_indexes = [6,7,8,9,19,20,21,26,27,28,31,32,33,42,50]
+N_indexes = [10,11,12,13,22,23,29,34,35,36,43,45,47]
+P_indexes = [14,15,16,17,24,25,30,37,38,39,44,46]
 
 # number of state variables
 
@@ -66,7 +70,8 @@ def build_model(depth=n_vertical, n_vars=number_state_variables, n_forcing=numbe
     output = layers.Add()([state_input, dx])
 
     return models.Model(inputs=[state_input, forcing_input], outputs=output)
-    
+
+
     
 def make_sequences(data, forcing, K):
     X0, F_seq, Y_seq = [], [], []
@@ -88,6 +93,7 @@ i=Dataset("result.nc")
 
 # Arrays with time x depths x variables dimensions
 
+original_state_variables = {"mean":np.zeros((number_state_variables)), "std":np.zeros((number_state_variables))}   # normalized values
 normalized_state_variables = np.zeros((length_time, n_vertical, number_state_variables))   # normalized values
 forcing_variables = np.zeros((length_time, number_forcing_variables))   # forcing values
 
@@ -96,6 +102,8 @@ forcing_variables = np.zeros((length_time, number_forcing_variables))   # forcin
 
 for index, var in enumerate(state_variables_names):    
     vinp = i.variables[var][:][start_time:start_time+length_time,:,0,0]
+    original_state_variables["mean"][index] = vinp.mean()
+    original_state_variables["std"][index] = vinp.std()    
     normalized_state_variables[:,:,index] = (vinp - vinp.mean())/vinp.std()
     
 for index, var in enumerate(forcing_variables_names):
@@ -107,7 +115,8 @@ for index, var in enumerate(forcing_variables_names):
         vinp = i.variables[var][:][start_time:start_time+length_time,0,0]
         vinp = (vinp - vinp.mean())/vinp.std()
         forcing_variables[:,index] = vinp        
-    
+  
+H_t = i.variables["h"][:][start_time:start_time+length_time,:,0,0].mean(axis=0)    
 i.close()
 
 
@@ -119,11 +128,45 @@ training_outputs = normalized_state_variables[1:,:,:]
 
 training_state_variables = training_state_variables.astype(np.float32)
 training_forcing_variables = training_forcing_variables.astype(np.float32)
-       
 
+lambda_mass = 0.33
+lambda_bound = 0.33
+
+def bounds_loss_comp(x, pars):
+    # ensure TensorFlow tensors with correct dtype
+    mean = tf.convert_to_tensor(pars["mean"], dtype=tf.float32)
+    std  = tf.convert_to_tensor(pars["std"],  dtype=tf.float32)
+
+    lower_bound = -mean / std
+    upper_bound = tf.constant(20.0, dtype=tf.float32)
+
+    # reshape depending on x shape
+    lower_bound = tf.reshape(lower_bound, [1, -1])
+    
+    # compute violations
+    lower_violation = tf.nn.relu(lower_bound - x)
+    upper_violation = tf.nn.relu(x - upper_bound)
+
+    return tf.reduce_mean(lower_violation**2 + upper_violation**2)
+
+       
+def compute_mass(x, pars, H_t, indices):
+    x_sum = 0
+    for index in indices:
+        x_sum += (x[:, index]*pars["std"][index] + pars["mean"][index])*H_t.sum() 
+    # sum over spatial dimension (and possibly variables)
+    return x_sum   # shape [B, V]
 # -------------------------- Loop through ensemble members and individually train and save the best models
 
-for ens in range(1,3):
+for ens in range(0,15):
+
+    tf.keras.backend.clear_session()
+
+    seed = ens
+
+    np.random.seed(seed)
+    tf.random.set_seed(seed)
+    random.seed(seed)
 
     history = {
     "train_loss": [],
@@ -142,10 +185,34 @@ for ens in range(1,3):
                 f = f_seq[:, k]        # [B, F]
                 y_true = y_seq[:, k]   # [B, D, V]
            
+                x_prev = x
                 x = model([x, f], training=True)
 
-                loss = tf.reduce_mean((x - y_true)**2)
-                total_loss += loss
+#                loss = tf.reduce_mean((x - y_true)**2)
+                data_loss = tf.reduce_mean((x - y_true)**2)
+
+                eps = 1e-8
+                mass_C_prev = compute_mass(x_prev, original_state_variables, H_t, C_indexes)
+                mass_C_next = compute_mass(x, original_state_variables, H_t, C_indexes)
+                mass_loss_C = tf.reduce_mean((mass_C_next - mass_C_prev)**2) / (tf.reduce_mean(mass_C_prev**2) + eps)
+                
+#                tf.reduce_mean((mass_C_next/mass_C_prev - 1)**2)
+
+                mass_N_prev = compute_mass(x_prev, original_state_variables, H_t, N_indexes)
+                mass_N_next = compute_mass(x, original_state_variables, H_t, N_indexes)
+#                mass_loss_N = tf.reduce_mean((mass_N_next/mass_N_prev - 1)**2)
+                mass_loss_N = tf.reduce_mean((mass_N_next - mass_N_prev)**2) / (tf.reduce_mean(mass_N_prev**2) + eps)
+
+                mass_P_prev = compute_mass(x_prev, original_state_variables, H_t, P_indexes)
+                mass_P_next = compute_mass(x, original_state_variables, H_t, P_indexes)
+#                mass_loss_P = tf.reduce_mean((mass_P_next/mass_P_prev - 1)**2)
+                mass_loss_P = tf.reduce_mean((mass_P_next - mass_P_prev)**2) / (tf.reduce_mean(mass_P_prev**2) + eps)
+
+                bounds_loss = bounds_loss_comp(x, original_state_variables)
+
+                loss = data_loss + lambda_mass * (mass_loss_C+mass_loss_N+mass_loss_P) + lambda_bound * bounds_loss
+                
+                total_loss += loss                
 
             total_loss /= tf.cast(K, tf.float32)
 
@@ -196,6 +263,8 @@ for ens in range(1,3):
                 y_batch  = Y_train[i:i+batch_size]
                 loss = train_step(model, optimizer, x0_batch, f_batch, y_batch)
                 train_loss_epoch += loss
+#                print(loss)
+                
                 num_batches += 1
                 train_loss_epoch /= num_batches
 
@@ -231,7 +300,7 @@ for ens in range(1,3):
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 wait = 0
-                model.save("best_model_CNN_"+str(ens)+".keras")  # save the best weights
+                model.save("best_model_CNN_MC_"+str(ens)+".keras")  # save the best weights
             else:
                 wait += 1
                 if wait >= patience:
@@ -240,7 +309,7 @@ for ens in range(1,3):
 
      # save history
 
-        with open(f"history_CNN_ens_{ens}.json", "w") as f:
+        with open(f"history_CNN_MC_ens_{ens}.json", "w") as f:
             json.dump(history, f)
 
 

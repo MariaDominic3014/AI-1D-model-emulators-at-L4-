@@ -1,4 +1,7 @@
 # Code to use a trained LSTM emulator for a rollout prediction. The test data are stored in a netCDF file, the outputs are stored in another netCDF file. 
+
+# This is a modification of the predict_LSTM.py code such that it includes MLD as input and predicts also vertically averaged values of phytoplankton and zooplankton variables, as well as sea bottom oxygen. 
+
 # Initial version written by JS (early April 26) with significant input of code by AI (ChatGPT) 
 
 
@@ -40,7 +43,8 @@ lookback=30
 
 # state variables included
   
-state_variables_names = ["P1_Chl", "P2_Chl", "P3_Chl", "P4_Chl", "Z4_c", "Z5_c", "Z6_c", "N3_n", "N1_p", "N4_n", "N5_s", "O2_o"]  
+#state_variables_names = ["P1_Chl", "P2_Chl", "P3_Chl", "P4_Chl", "Z4_c", "Z5_c", "Z6_c", "N3_n", "N1_p", "N4_n", "N5_s", "O2_o"]  
+state_variables_names = ["P1_Chl", "P2_Chl", "P3_Chl", "P4_Chl", "Z4_c", "Z5_c", "Z6_c", "N3_n", "N1_p", "N4_n", "N5_s", "O2_o", "P1_Chl_vert", "P2_Chl_vert", "P3_Chl_vert", "P4_Chl_vert", "Z4_c_vert", "Z5_c_vert", "Z6_c_vert", "O2_bot"] 
 
 # number of state variables
 
@@ -48,7 +52,7 @@ number_state_variables = len(state_variables_names)
 
 # forcing variables included
     
-forcing_variables_names = ["light_parEIR", "u10", "v10", "precip", "heat", "temp", "salt"]
+forcing_variables_names = ["light_parEIR", "u10", "v10", "precip", "heat", "temp", "salt", "mld_surf"]
 
 # number of forcing variables
 
@@ -57,16 +61,19 @@ number_forcing_variables = len(forcing_variables_names)
 # parameters defining the dimensions
 
 start_time = 365 + 334  # account for spin up (nearly 2 years)
-length_training_time = int(15*365.25)  # length of the time series for training and validation data
-length_testing_time = 671  # length of the time series for training and validation data
+length_training_time = int(12*365.25)  # length of the time series for training and validation data
+length_testing_time = 8734 - start_time#671 + int(15*365.25)  # length of the time series for training and validation data
 
 
 
-i=Dataset("result.nc")
+i=Dataset("../results/result_2002-2025.nc")
+
+h=i.variables["h"][:][:,:,0,0]
+
 
 # Arrays with time x depths x variables dimensions
 
-orig_state_variables = np.zeros((length_training_time+length_testing_time, number_state_variables))  # the original values stored before normalization - store the training period
+orig_state_variables = np.zeros((length_testing_time, number_state_variables))  # the original values stored before normalization - store the training period
 normalized_state_variables = np.zeros((length_testing_time, number_state_variables))   # normalized values  - from test period (!)
 forcing_variables = np.zeros((length_testing_time, number_forcing_variables))   # forcing values  - from test period
 
@@ -74,30 +81,37 @@ forcing_variables = np.zeros((length_testing_time, number_forcing_variables))   
 # read in and normalize
 
 for index, var in enumerate(state_variables_names):    
-    orig_state_variables[:,index] = i.variables[var][:][start_time:,-1,0,0]
-    normalized_state_variables[:,index] = (i.variables[var][:][start_time+length_training_time:,-1,0,0] - orig_state_variables[:length_training_time,index].mean())/orig_state_variables[:length_training_time,index].std()
+    if "vert" in var:
+        orig_state_variables[:,index] = (i.variables[var[:-5]][:][start_time:,:,0,0]*h[start_time:,:]).sum(axis=1)/h[start_time:,:].sum(axis=1)
+        normalized_state_variables[:,index] = ((i.variables[var[:-5]][:][start_time:,:,0,0]*h[start_time:,:]).sum(axis=1)/h[start_time:,:].sum(axis=1) - orig_state_variables[:length_training_time,index].mean())/orig_state_variables[:length_training_time,index].std()
+    elif var == "O2_bot":
+        orig_state_variables[:,index] = (i.variables["O2_o"][:][start_time:,0:5,0,0]*h[start_time:,0:5]).sum(axis=1)/h[start_time:,0:5].sum(axis=1)
+        normalized_state_variables[:,index] = ((i.variables["O2_o"][:][start_time:,0:5,0,0]*h[start_time:,0:5]).sum(axis=1)/h[start_time:,0:5].sum(axis=1) - orig_state_variables[:length_training_time,index].mean())/orig_state_variables[:length_training_time,index].std()
+    else:
+        orig_state_variables[:,index] = i.variables[var][:][start_time:,-1,0,0]
+        normalized_state_variables[:,index] = (i.variables[var][:][start_time:,-1,0,0] - orig_state_variables[:length_training_time,index].mean())/orig_state_variables[:length_training_time,index].std()
     
 for index, var in enumerate(forcing_variables_names):
     if var in ["light_parEIR", "temp", "salt"]:    
         vinp = i.variables[var][:][start_time:start_time+length_training_time,-1,0,0]
-        forcing_variables[:,index] = (i.variables[var][:][start_time+length_training_time:,-1,0,0] - vinp.mean())/vinp.std()
+        forcing_variables[:,index] = (i.variables[var][:][start_time:,-1,0,0] - vinp.mean())/vinp.std()
     else:    
         vinp = i.variables[var][:][start_time:start_time+length_training_time,0,0]
-        forcing_variables[:,index] = (i.variables[var][:][start_time+length_training_time:,0,0] - vinp.mean())/vinp.std()     
+        forcing_variables[:,index] = (i.variables[var][:][start_time:,0,0] - vinp.mean())/vinp.std()     
     
 i.close()
 
 
 
-for ens in range(1,2):
+for ens in range(0,15):
 
-    model = tf.keras.models.load_model("best_model_LSTM_NPZ_"+str(ens)+".keras")   
+    model = tf.keras.models.load_model("best_model_LSTM_vert_dm_imp_"+str(ens)+".keras")   
 
     Y_pred_norm = rollout(model, normalized_state_variables[:lookback], forcing_variables, lookback=30, steps=length_testing_time-30)  
 
     Y_pred = Y_pred_norm*orig_state_variables[:length_training_time,:].std(axis=0) + orig_state_variables[:length_training_time,:].mean(axis=0)
 
-    o=Dataset("Predicted_LSTM_ens_"+str(ens)+".nc", "w", format="NETCDF4_CLASSIC")
+    o=Dataset("Predicted_LSTM_vert_ens_dm_imp_full_"+str(ens)+".nc", "w", format="NETCDF4_CLASSIC")
 
     o.createDimension("time", length_testing_time-lookback)
 #o.createDimension("depth", 100)
@@ -109,7 +123,7 @@ for ens in range(1,2):
         variable = o.createVariable("predicted_"+var, np.float32, ("time"))
         variable[:] = Y_pred[:,index]
         variable = o.createVariable("test_"+var, np.float32, ("time"))
-        variable[:] = orig_state_variables[length_training_time+lookback:,index]    
+        variable[:] = orig_state_variables[lookback:,index]    
  
     
     o.close()
