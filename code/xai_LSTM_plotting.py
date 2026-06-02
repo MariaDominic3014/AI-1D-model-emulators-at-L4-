@@ -54,28 +54,34 @@ def load_ensemble(file):
 
     grad_bio = nc.variables["grad_bio"][:]   # (time, lag, bio_var)
     grad_forcing = nc.variables["grad_forcing_history"][:]  # (time, lag, forcing_var)
+    grad_future_forcing = nc.variables["grad_forcing_future"][:] # (time, forcing_var)
 
     bio_vars = nc.bio_variables.split(",")
     forcing_vars = nc.forcing_variables.split(",")
+    #grad_future_forcing = nc.forcing_variables.split(",")
 
     nc.close()
-    return grad_bio, grad_forcing, bio_vars, forcing_vars
-
+    return grad_bio, grad_forcing, grad_future_forcing, bio_vars, forcing_vars
 
 bio_list = []
 forcing_list = []
+future_forcing_list = []
 
 for f in files:
-    gb, gf, bio_vars, forcing_vars = load_ensemble(f)
+    gb, gf, gff, bio_vars, forcing_vars = load_ensemble(f)
     bio_list.append(gb)
     forcing_list.append(gf)
+    future_forcing_list.append(gff)
 
 bio = np.mean(np.stack(bio_list), axis=0)
 forcing = np.mean(np.stack(forcing_list), axis=0)
+future_forcing = np.mean(np.stack(future_forcing_list), axis=0)
 
 # absolute sensitivities
 bio = np.abs(bio)
 forcing = np.abs(forcing)
+future_forcing = np.abs(future_forcing)
+print(bio.shape, forcing.shape, future_forcing.shape)
 
 nt, lag, nb = bio.shape
 _, _, nf = forcing.shape
@@ -87,10 +93,12 @@ lag_axis = np.arange(lag)
 # 1. HOVMÖLLER (time vs input variable)
 # =========================================================
 
-bio_hov = bio.mean(axis=1)        # (time, bio_var)
-forcing_hov = forcing.mean(axis=1)  # (time, forcing_var)
+#bio_hov = bio.mean(axis=1)        # (time, bio_var)
+#forcing_hov = forcing.mean(axis=1)  # (time, forcing_var)
+bio_hov = bio.max(axis=1)        # (time, bio_var)
+forcing_hov = forcing.max(axis=1)  # (time, forcing_var)
 
-fig, axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+fig, axes = plt.subplots(3, 1, figsize=(12, 8), sharex=True)
 
 vmax_comb = np.max([np.max(bio_hov), np.max(forcing_hov)])
 st,en=4400,8000
@@ -135,6 +143,7 @@ axes[0].set_title(f"Biological input sensitivities for {plot_var_name[TARGET]} (
 #axes[0].set_ylabel("Bio variables")
 axes[0].set_yticks(np.arange(nb))
 axes[0].set_yticklabels([plot_var_name[v] for v in bio_vars])
+axes[0].invert_yaxis()
 
 plt.colorbar(im0, ax=axes[0])
 
@@ -149,13 +158,30 @@ axes[1].set_title(f"Forcing sensitivities for {plot_var_name[TARGET]} (mean over
 axes[1].set_yticks(np.arange(nf))
 axes[1].set_yticklabels([plot_var_name[v] for v in forcing_vars])
 
+
 plt.colorbar(im1, ax=axes[1])
+
+
+im2 = axes[2].imshow(
+    future_forcing[st:en, :].T,
+    aspect="auto",
+    origin="lower",
+    interpolation='none', cmap="Reds",# vmax=vmax_comb
+)
+axes[2].set_title(f"Future forcing sensitivities for {plot_var_name[TARGET]}")
+#axes[2].set_ylabel("Forcing variables")
+axes[2].set_yticks(np.arange(nf))
+axes[2].set_yticklabels([plot_var_name[v] for v in forcing_vars])
+
+
+plt.colorbar(im2, ax=axes[2])
+
 
 for ax in axes:
     ax.set_xticks(year_ticks)
     ax.set_xticklabels(year_labels, rotation=45, ha="right")
 
-axes[1].set_xlabel("Year")
+axes[2].set_xlabel("Year")
 
 plt.tight_layout()
 plt.savefig(f"../plots/{TARGET}_to_hovmoller.png")
