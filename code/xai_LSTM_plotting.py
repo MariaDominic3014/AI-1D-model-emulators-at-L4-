@@ -40,7 +40,7 @@ plot_var_name = {
 # CONFIG
 # =========================================================
 
-TARGET = "O2_bot"   # must match filename convention
+TARGET = "N3_n"   # must match filename convention
 #N_ENSEMBLES = 15
 
 files = sorted(glob.glob(f"Sensitivities_{TARGET}_ens_*.nc"))
@@ -139,7 +139,7 @@ im0 = axes[0].imshow(
     origin="lower",
     interpolation='none', cmap="Greens",# vmax=vmax_comb
 )
-axes[0].set_title(f"Biological input sensitivities for {plot_var_name[TARGET]} (mean over input window)")
+axes[0].set_title(f"Biological input sensitivities for {plot_var_name[TARGET]} (max from input window)")
 #axes[0].set_ylabel("Bio variables")
 axes[0].set_yticks(np.arange(nb))
 axes[0].set_yticklabels([plot_var_name[v] for v in bio_vars])
@@ -153,7 +153,7 @@ im1 = axes[1].imshow(
     origin="lower",
     interpolation='none', cmap="Reds",# vmax=vmax_comb
 )
-axes[1].set_title(f"Forcing sensitivities for {plot_var_name[TARGET]} (mean over input window)")
+axes[1].set_title(f"Forcing sensitivities for {plot_var_name[TARGET]} (max from input window)")
 #axes[1].set_ylabel("Forcing variables")
 axes[1].set_yticks(np.arange(nf))
 axes[1].set_yticklabels([plot_var_name[v] for v in forcing_vars])
