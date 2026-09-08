@@ -105,7 +105,7 @@ def create_dataset(B, F, lookback):
 
 
 
-#SECTION 4 - define the functions that will build the model and create the loss function that the model will use
+#SECTION 4 - define the functions for building the model and the loss function that the model will use
 def build_model(lookback, number_state_variables_stats, optimizer='adam', loss='mse', metrics=None, verbose=False):
     if metrics is None:
         metrics = []
@@ -357,7 +357,7 @@ def lognormal_crps(y_true, y_pred):
 
 
 
-#SECTION 5 - call the function to create the input and target datasets, and then split each of them into separate training and validation sets
+#SECTION 5 - create the input and target datasets, and then split each of them into separate training and validation sets
 X_bio, X_force, X_force_future, Y = create_dataset(state_variables_stats, forcing_variables, lookback)
 
 train_frac = 0.8
@@ -470,7 +470,7 @@ np.savez(
 
 
 
-#SECTION 7 - call the function that builds the model with the crps loss function, define any callbacks, train the model over a maximum of 250 epochs, write the training history to a JSON file and save the best model in a .keras file
+#SECTION 7 - build and train the model with the crps loss function
 model = build_model(lookback, number_state_variables_stats, loss=gaussian_crps, metrics=[])
 print("\nModel Architecture:")
 model.summary()

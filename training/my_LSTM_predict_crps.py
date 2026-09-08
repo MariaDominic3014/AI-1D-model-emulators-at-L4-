@@ -151,7 +151,7 @@ for var_name in combined_stats.keys():
     pre_normalised_state_variables_stats[:, col_index+1] = combined_stats[var_name]["std"]
     col_index += 2
 
-################# correct normalisation statistics (preprocessed stats) ###########
+################# normalisation statistics (preprocessed stats) ###########
 model_name = "crps_original"
 preprocessing_path = Path(__file__).parent / model_name / f"{model_name}_preprocessing.npz"
 preprocessing = np.load(preprocessing_path)
@@ -208,7 +208,7 @@ Y_pred_norm = rollout(model, normalised_state_variables_stats[:lookback], forcin
 
 print("\nROLLOUT PREDICTION COMPLETE")
 
-####################### correct reverse-normalisation steps #######################
+####################### reverse-normalisation steps #######################
 Y_pred = np.empty_like(Y_pred_norm)
 
 # Predicted ensemble means
