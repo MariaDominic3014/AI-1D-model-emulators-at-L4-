@@ -1,0 +1,39 @@
+starts on 01/02/2002 and ends on 30/12/2025
+
+dimensions(sizes): time(8733), n_members(1100)
+
+variables(dimensions):
+    float32 N1_p(time, n_members),
+    float32 N3_n(time, n_members),
+    float32 N4_n(time, n_members),
+    float32 N5_s(time, n_members),
+
+    float32 O2_bot(time, n_members),
+    float32 O2_o(time, n_members),
+
+    float32 P1_Chl(time, n_members),
+    float32 P1_Chl_vert(time, n_members),
+    float32 P2_Chl(time, n_members),
+    float32 P2_Chl_vert(time, n_members),
+    float32 P3_Chl(time, n_members),
+    float32 P3_Chl_vert(time, n_members),
+    float32 P4_Chl(time, n_members),
+    float32 P4_Chl_vert(time, n_members),
+    
+    float32 Z4_c(time, n_members),
+    float32 Z4_c_vert(time, n_members),
+    float32 Z5_c(time, n_members),
+    float32 Z5_c_vert(time, n_members),
+    float32 Z6_c(time, n_members),
+    float32 Z6_c_vert(time, n_members),
+
+
+
+    float32 heat(time),
+    float32 light_parEIR_surf(time),
+    float32 mld_surf(time),
+    float32 precip(time),
+    float32 salt(time),
+    float32 temp(time),
+    float32 u10(time),
+    float32 v10(time)
