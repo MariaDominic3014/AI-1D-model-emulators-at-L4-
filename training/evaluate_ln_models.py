@@ -10,7 +10,7 @@ from scipy.stats import lognorm, kstest
 
 # SECTION 1
 #   "mse_ln" or "crps_ln"
-MODEL_NAME = "mse_ln"
+MODEL_NAME = "crps_ln"
 
 SCRIPT_DIR = Path(__file__).parent
 PREDICTION_FILE = (SCRIPT_DIR / MODEL_NAME / f"{MODEL_NAME}_log_predicted.nc")
@@ -19,12 +19,15 @@ ENSEMBLE_FILE = (SCRIPT_DIR.parent / "data" / "processed_ensemble.nc")
 VARIABLES = ["P1_Chl", "P1_Chl_vert", "P2_Chl", "P2_Chl_vert", "Z6_c", "Z6_c_vert", "N1_p", "N3_n", "N4_n", "N5_s", "O2_bot", "O2_o", "P3_Chl", "P3_Chl_vert", "P4_Chl", "P4_Chl_vert", "Z5_c", "Z5_c_vert", "Z4_c", "Z4_c_vert"]
 START_TIME = 365 + 334
 LOOKBACK = 30
-TRAINING_PERIOD = int(12*365.25)
+TRAINING_PERIOD = 4383   #int(12*365.25)
+VALIDATION_PERIOD = 1095   #int(3*365.25)
+TEST_PERIOD = 2556   #int(7*365.25)
 
 EPSILON = 1e-6
 
 
-# SECTION 2 - EVALUATION FUNCTIONS
+
+# SECTION 2
 def crps_lognormal_vs_lognormal(pred_mu, pred_sigma, target_mu, target_sigma):
     # Calculate the distributional CRPS / energy distance between
     # predicted and target lognormal distributions.
@@ -180,7 +183,7 @@ def nanmean_or_nan(values):
 
 
 
-# SECTION 3 — LOAD PREDICTIONS
+# SECTION 3
 print("=" * 70)
 print("PROBABILISTIC MODEL EVALUATION")
 print("=" * 70)
@@ -191,188 +194,172 @@ prediction_ds = Dataset(str(PREDICTION_FILE), "r")
 ensemble_ds = Dataset(str(ENSEMBLE_FILE), "r")
 
 prediction_file_length = len(prediction_ds.dimensions["time"])
-evaluation_length = TRAINING_PERIOD
-
-print(f"Prediction-file timesteps: {prediction_file_length}")
-print(f"Evaluation timesteps: {evaluation_length}")
-print()
+TRAINING_EVAL_LENGTH = TRAINING_PERIOD - LOOKBACK   #the first 30 days of the training period are before predictions begin
+TEST_EVAL_START = TRAINING_EVAL_LENGTH + VALIDATION_PERIOD
+TEST_EVAL_LENGTH = TEST_PERIOD
 
 
 
-# SECTION 4 — STORAGE FOR RESULTS
-results = []
-per_timestep_results = []
+# SECTION 4
+def evaluate_period(period_name, prediction_start, evaluation_length):
+    results = []
+    per_timestep_results = []
+
+    print(f"Evaluating {period_name} period")
+    print(f"Prediction start index: {prediction_start}")
+    print(f"Evaluation timesteps: {evaluation_length}")
+    print()
+    
+    for variable_name in VARIABLES:
+        print(f"Evaluating {variable_name}...")
+
+        prediction_end = prediction_start + evaluation_length
+
+        predicted_mu = np.asarray(prediction_ds.variables["predicted_mean_" + variable_name][prediction_start:prediction_end], dtype=np.float64)
+        predicted_sigma = np.asarray(prediction_ds.variables["predicted_std_" + variable_name][prediction_start:prediction_end], dtype=np.float64)
+        #assume that any negative std are just really small - this is only for the mse model, because the crps model's std already have softplus applied to them
+        if MODEL_NAME == "mse_ln":
+            predicted_sigma = np.where(
+                predicted_sigma <= 0,
+                EPSILON,
+                predicted_sigma
+            )
+        predicted_lognormal_mode = np.exp(predicted_mu - predicted_sigma**2) - np.exp(-8)   #reverse the offset used before the initial log transform
+
+        target_mu = np.asarray(prediction_ds.variables["test_mean_" + variable_name][prediction_start:prediction_end], dtype=np.float64)
+        target_sigma = np.asarray(prediction_ds.variables["test_std_" + variable_name][prediction_start:prediction_end], dtype=np.float64)
+        #protect against zero target std
+        target_sigma = np.maximum(target_sigma, EPSILON)
+        target_lognormal_mode = np.exp(target_mu - target_sigma**2) - np.exp(-8)   #reverse the offset
+
+        # Check that every prediction array matches the NetCDF time dimension.
+        if not (
+            len(predicted_mu)
+            == len(predicted_sigma)
+            == len(target_mu)
+            == len(target_sigma)
+            == evaluation_length
+        ):
+            raise ValueError(
+                f"Prediction-array length mismatch for {variable_name}: "
+                f"predicted_mu={len(predicted_mu)}, "
+                f"predicted_sigma={len(predicted_sigma)}, "
+                f"target_mu={len(target_mu)}, "
+                f"target_sigma={len(target_sigma)}, "
+                f"evaluation_length={evaluation_length}"
+            )
+
+        # --------------------------------------------------------
+        # Load the actual ensemble corresponding to the prediction period.
+        # Prediction starts at START_TIME + LOOKBACK because the first 30 timesteps are used to initialise the LSTM.
+        # --------------------------------------------------------
+        ensemble_variable = ensemble_ds.variables[variable_name]
+
+        ensemble_start = START_TIME + LOOKBACK + prediction_start
+        ensemble_end = ensemble_start + evaluation_length
+
+        if ensemble_variable.shape[0] < ensemble_end:
+            raise ValueError(
+                f"Ensemble does not contain enough timesteps for {variable_name}: "
+                f"available={ensemble_variable.shape[0]}, "
+                f"required={ensemble_end}"
+            )
+
+        ensemble = np.asarray(ensemble_variable[ensemble_start:ensemble_end], dtype=np.float64,)
 
 
 
-# SECTION 5 — EVALUATE EACH VARIABLE
-for variable_name in VARIABLES:
-    print(f"Evaluating {variable_name}...")
+        # METRICS
+        squared_errors = (predicted_lognormal_mode - target_lognormal_mode) ** 2
+        bias_errors = predicted_lognormal_mode - target_lognormal_mode
 
-    predicted_mu = np.asarray(prediction_ds.variables["predicted_mean_" + variable_name][:evaluation_length], dtype=np.float64)
-    predicted_sigma = np.asarray(prediction_ds.variables["predicted_std_" + variable_name][:evaluation_length], dtype=np.float64)
-    predicted_lognormal_mode = np.exp(predicted_mu - predicted_sigma**2) - np.exp(-8)   #reverse the offset used before the initial log transform
-    #for crps and gof metrics, assume that any negative std are just really small - this is only for the mse model, because the crps model's std already have softplus applied to them
-    if MODEL_NAME == "mse_ln":
-        predicted_sigma = np.where(
-            predicted_sigma <= 0,
-            EPSILON,
-            predicted_sigma
-        )
+        crps_target_values = np.full(evaluation_length, np.nan, dtype=np.float64)
+        lognormal_predicted_ks = np.full(evaluation_length, np.nan, dtype=np.float64)
+    
+        for timestep_index in range(evaluation_length):
+            # Predicted Lognormal vs Target Lognormal
+            crps_target_values[timestep_index] = crps_lognormal_vs_lognormal(
+                predicted_mu[timestep_index],
+                predicted_sigma[timestep_index],
+                target_mu[timestep_index],
+                target_sigma[timestep_index],
+            )
 
-    target_mu = np.asarray(prediction_ds.variables["test_mean_" + variable_name][:evaluation_length], dtype=np.float64)
-    target_sigma = np.asarray(prediction_ds.variables["test_std_" + variable_name][:evaluation_length], dtype=np.float64)
-    target_lognormal_mode = np.exp(target_mu - target_sigma**2) - np.exp(-8)   #reverse the offset
-    #for crps and gof metrics, protect against zero target std
-    target_sigma = np.maximum(target_sigma, EPSILON)
-
-    # Check that every prediction array matches the NetCDF time dimension.
-    if not (
-        len(predicted_mu)
-        == len(predicted_sigma)
-        == len(target_mu)
-        == len(target_sigma)
-        == evaluation_length
-    ):
-        raise ValueError(
-            f"Prediction-array length mismatch for {variable_name}: "
-            f"predicted_mu={len(predicted_mu)}, "
-            f"predicted_sigma={len(predicted_sigma)}, "
-            f"target_mu={len(target_mu)}, "
-            f"target_sigma={len(target_sigma)}, "
-            f"evaluation_length={evaluation_length}"
-        )
-
-    # --------------------------------------------------------
-    # Load the actual ensemble corresponding to the prediction period.
-    # Prediction starts at START_TIME + LOOKBACK because the first 30 timesteps are used to initialise the LSTM.
-    # --------------------------------------------------------
-    ensemble_variable = ensemble_ds.variables[variable_name]
-
-    if ensemble_variable.shape[0] < (
-        START_TIME + LOOKBACK + evaluation_length
-    ):
-        raise ValueError(
-            f"Ensemble does not contain enough timesteps for {variable_name}: "
-            f"available={ensemble_variable.shape[0]}, "
-            f"required={START_TIME + LOOKBACK + evaluation_length}"
-        )
-
-    ensemble = np.asarray(
-        ensemble_variable[
-            START_TIME + LOOKBACK:
-            START_TIME + LOOKBACK + evaluation_length
-        ],
-        dtype=np.float64,
-    )
-
-    if ensemble.shape[0] != evaluation_length:
-        raise ValueError(
-            f"Ensemble/prediction length mismatch for {variable_name}: "
-            f"{ensemble.shape[0]} vs {evaluation_length}"
-        )
+            # Predicted Lognormal GOF
+            lognormal_predicted_ks[timestep_index] = lognormal_fit_score(
+                ensemble[timestep_index],
+                predicted_mu[timestep_index],
+                predicted_sigma[timestep_index]
+            ).ks_statistic
 
 
-
-    # MEAN ERROR
-    squared_errors = np.full(evaluation_length, np.nan, dtype=np.float64)
-    bias_errors = np.full(evaluation_length, np.nan, dtype=np.float64)
-
-    residuals = predicted_lognormal_mode - target_lognormal_mode
-
-    squared_errors = residuals ** 2
-    bias_errors = residuals
-
-    # ========================================================
-    # MSE of modes
-    mse = nanmean_or_nan(squared_errors)
-
-    # ========================================================
-    # MBE of modes
-    mbe = nanmean_or_nan(bias_errors)
-
-    # ========================================================
-    # CRPS
-    crps_target_values = np.full(evaluation_length, np.nan, dtype=np.float64)
-
-    # ========================================================
-    # GOF
-    lognormal_predicted_ks = np.full(evaluation_length, np.nan, dtype=np.float64)
-   
-
-    for timestep_index in range(evaluation_length):
-        # Predicted Lognormal vs Target Lognormal
-        crps_target_value = crps_lognormal_vs_lognormal(
-            predicted_mu[timestep_index],
-            predicted_sigma[timestep_index],
-            target_mu[timestep_index],
-            target_sigma[timestep_index],
-        )
-        crps_target_values[timestep_index] = crps_target_value
+        mse = nanmean_or_nan(squared_errors)
+        mbe = nanmean_or_nan(bias_errors)
+        crps_target = nanmean_or_nan(crps_target_values)
+        gof_result = nanmean_or_nan(lognormal_predicted_ks)
 
 
-        # Predicted Lognormal GOF
-        gof_result_values = lognormal_fit_score(
-            ensemble[timestep_index],
-            predicted_mu[timestep_index],
-            predicted_sigma[timestep_index]
-        )
-        lognormal_predicted_ks[timestep_index] = gof_result_values.ks_statistic
-
-
-    crps_target = nanmean_or_nan(crps_target_values)
-    gof_result = nanmean_or_nan(lognormal_predicted_ks)
-
-    # ========================================================
-    # SAVE PER-VARIABLE RESULTS
-    # ========================================================
-    results.append({
-        "variable": variable_name,
-        "MSE": mse,
-        "MBE": mbe,
-        "CRPS_vs_target": crps_target,
-        "GOF_KS": gof_result,
-    })
-
-    # --------------------------------------------------------
-    # Save individual timestep metrics
-    # --------------------------------------------------------
-    for timestep_index in range(evaluation_length):
-        per_timestep_results.append({
+        # SAVE PER-VARIABLE RESULTS
+        results.append({
             "variable": variable_name,
-            "timestep": timestep_index,
-            "MSE": squared_errors[timestep_index],
-            "MBE": bias_errors[timestep_index],
-            "CRPS_vs_target": crps_target_values[timestep_index],
-            "GOF_KS": lognormal_predicted_ks[timestep_index],
+            "MSE": mse,
+            "MBE": mbe,
+            "CRPS_vs_target": crps_target,
+            "KS_GOF": gof_result,
         })
 
-    print(f"    MSE: {mse:.6g}")
-    print(f"    MBE: {mbe:.6g}")
-    print(f"    CRPS vs target: {crps_target:.6g}")
-    print(f"    GOF_KS: {gof_result:.6g}")
+        # Save individual timestep metrics
+        for timestep_index in range(evaluation_length):
+            per_timestep_results.append({
+                "variable": variable_name,
+                "timestep": timestep_index,
+                "MSE": squared_errors[timestep_index],
+                "MBE": bias_errors[timestep_index],
+                "CRPS_vs_target": crps_target_values[timestep_index],
+                "KS_GOF": lognormal_predicted_ks[timestep_index],
+            })
+
+        print(f"    MSE: {mse:.6g}")
+        print(f"    MBE: {mbe:.6g}")
+        print(f"    CRPS vs target: {crps_target:.6g}")
+        print(f"    KS_GOF: {gof_result:.6g}")
+        print()
+
+    results_df = pd.DataFrame(results)
+    per_timestep_df = pd.DataFrame(per_timestep_results)
+
+    results_file = (
+        SCRIPT_DIR / f"{MODEL_NAME}_{period_name}_evaluation_per_variable.csv"
+    )
+    timestep_file = (
+        SCRIPT_DIR / f"{MODEL_NAME}_{period_name}_evaluation_per_timestep.csv"
+    )
+
+    results_df.to_csv(results_file, index=False)
+    per_timestep_df.to_csv(timestep_file, index=False)
+
+    print("=" * 70)
+    print(f"{period_name.upper()} PERIOD RESULTS")
+    print("=" * 70)
+    print(results_df.to_string(index=False))
     print()
 
-
-
-# SECTION 6 — SAVE RESULTS
-results_df = pd.DataFrame(results)
-per_timestep_df = pd.DataFrame(per_timestep_results)
-
-results_file = (SCRIPT_DIR / f"{MODEL_NAME}_evaluation_per_variable.csv")
-timestep_file = (SCRIPT_DIR / f"{MODEL_NAME}_evaluation_per_timestep.csv")
-
-results_df.to_csv(results_file, index=False)
-per_timestep_df.to_csv(timestep_file, index=False)
+    return results_df, per_timestep_df
 
 
 
-# SECTION 7 — PRINT SUMMARY
-print("=" * 70)
-print("PER-VARIABLE RESULTS")
-print("=" * 70)
-print(results_df.to_string(index=False))
-print()
+# SECTION 5
+training_results_df, training_per_timestep_df = evaluate_period(
+    period_name="training",
+    prediction_start=0,
+    evaluation_length=TRAINING_EVAL_LENGTH,
+)
+
+test_results_df, test_per_timestep_df = evaluate_period(
+    period_name="test",
+    prediction_start=TEST_EVAL_START,
+    evaluation_length=TEST_EVAL_LENGTH,
+)
 
 
 
